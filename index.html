@@ -615,7 +615,7 @@ const V2 = (() => {
   function examMarkup(){
     const exam=validateExam(state.exams?.active);if(!exam){view='home';return homeMarkup();}
     const id=exam.ids[exam.index],q=questions.get(id),answers=exam.answers||{},order=exam.optionOrder[id];
-    return `<header class="quiz-head"><button class="btn small outline" data-v2="exam-home">暂存并返回首页</button><h2>模拟考试 · 第 ${exam.index+1} / 100 题</h2><span class="exam-clock" id="exam-countdown">${timeText(remaining(exam))}</span></header><div class="quiz-layout"><main class="question-panel"><span class="badge">单选题 · ${escape(chapterName(q.chapterId))}</span><h1 class="question-title">${questionCue(q.question)}</h1>${safeUrl(q.questionImg)?`<img class="question-image" src="${escape(q.questionImg)}" alt="题目配图">`:''}<div class="options">${order.map((code,i)=>{const a=q.answers.find(a=>a.answerCode===code);return `<button class="option ${answers[id]===code?'selected':''}" data-v2="exam-answer" data-code="${escape(code)}" aria-pressed="${answers[id]===code}"><span class="letter">${String.fromCharCode(65+i)}</span><span>${escape(plain(a.answer))}${safeUrl(a.answerImg)?`<img src="${escape(a.answerImg)}" alt="选项配图">`:''}</span></button>`;}).join('')}</div><p class="small muted">选择即保存，可修改答案；交卷后统一判分。</p><div class="quiz-controls"><button class="btn outline" data-v2="exam-prev" ${exam.index===0?'disabled':''}>上一题</button><button class="btn primary" data-v2="exam-next" ${exam.index===99?'disabled':''}>下一题</button></div></main><aside class="quiz-aside"><h3>已选 ${Object.keys(answers).length} / 100 题</h3><div class="palette">${exam.ids.map((id,i)=>`<button class="${i===exam.index?'current ':''}${answers[id]?'chosen-exam':''}" data-v2="exam-jump" data-index="${i}">${i+1}</button>`).join('')}</div><p class="small muted">蓝色表示已选择，不代表正确。到时自动交卷；刷新页面不会重置倒计时。</p><button class="btn primary" data-v2="exam-submit">交卷并查看分析</button></aside></div>`;
+    return `<header class="quiz-head"><button class="btn small outline" data-v2="exam-home">暂存并返回首页</button><h2>模拟考试 · 第 ${exam.index+1} / 100 题</h2><span class="exam-clock" id="exam-countdown">${timeText(remaining(exam))}</span></header><div class="quiz-layout"><main class="question-panel"><span class="badge">单选题 · ${escape(chapterName(q.chapterId))}</span><h1 class="question-title">${questionCue(q.question)}</h1>${safeUrl(q.questionImg)?`<img class="question-image" src="${escape(q.questionImg)}" alt="题目配图">`:''}<div class="options">${order.map((code,i)=>{const a=q.answers.find(a=>a.answerCode===code);return `<button class="option ${answers[id]===code?'selected':''}" data-v2="exam-answer" data-code="${escape(code)}" aria-pressed="${answers[id]===code}"><span class="letter">${String.fromCharCode(65+i)}</span><span>${escape(plain(a.answer))}${safeUrl(a.answerImg)?`<img src="${escape(a.answerImg)}" alt="选项配图">`:''}</span></button>`;}).join('')}</div><p class="small muted">选择即保存并自动进入下一题；可通过答题卡返回修改，交卷后统一判分。</p><div class="quiz-controls"><button class="btn outline" data-v2="exam-prev" ${exam.index===0?'disabled':''}>上一题</button><button class="btn primary" data-v2="exam-next" ${exam.index===99?'disabled':''}>下一题</button></div></main><aside class="quiz-aside"><h3>已选 ${Object.keys(answers).length} / 100 题</h3><div class="palette">${exam.ids.map((id,i)=>`<button class="${i===exam.index?'current ':''}${answers[id]?'chosen-exam':''}" data-v2="exam-jump" data-index="${i}">${i+1}</button>`).join('')}</div><p class="small muted">蓝色表示已选择，不代表正确。到时自动交卷；刷新页面不会重置倒计时。</p><button class="btn primary" data-v2="exam-submit">交卷并查看分析</button></aside></div>`;
   }
   function deterministicId(text){let a=2166136261,b=2246822519,c=3266489917,d=668265263;for(const ch of text){const n=ch.charCodeAt(0);a=Math.imul(a^n,16777619);b=Math.imul(b^n,3266489917);c=Math.imul(c^n,668265263);d=Math.imul(d^n,374761393);}const h=[a,b,c,d].map(x=>(x>>>0).toString(16).padStart(8,'0')).join('');return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);}
   function finishExam(automatic=false){
@@ -668,7 +668,9 @@ const V2 = (() => {
     else if(action==='exam-home'){clock.settle();save();view='home';render();}
     else if(action==='exam-answer'){
       const exam=state.exams?.active;if(!exam)return;if(remaining(exam)<=0){finishExam(true);return;}
-      clock.settle();exam.answers[exam.ids[exam.index]]=v.dataset.code;save();render();
+      clock.settle();exam.answers[exam.ids[exam.index]]=v.dataset.code;
+      const last=exam.index===exam.ids.length-1;if(!last)exam.index++;
+      save();render();window.scrollTo(0,0);if(last)toast('最后一题已保存，可检查答题卡后交卷。');
     }else if(['exam-prev','exam-next','exam-jump'].includes(action)){
       clock.settle();const exam=state.exams?.active;if(!exam)return;exam.index=action==='exam-jump'?Number(v.dataset.index):Math.max(0,Math.min(99,exam.index+(action==='exam-next'?1:-1)));save();render();window.scrollTo(0,0);
     }else if(action==='exam-submit')finishExam();
@@ -701,6 +703,7 @@ const V2 = (() => {
   }
   return {Cloud,clock,tier,timingIds,selectProfile,sync,startExam,finishExam,validateExam,projected,deterministicId,mergeBackup};
 })();
+
 
 const TextBackup=(()=>{
   const names=[['','本机访客'],['zhang-jiahao','张佳昊'],['ji-yaqun','纪亚群'],['huang-chunlin','黄春林']];
