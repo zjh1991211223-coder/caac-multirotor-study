@@ -1,0 +1,36 @@
+.cloud-panel>div.mobile-profile-summary{display:none}
+.cloud-settings>div:first-child{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+@media(max-width:650px), (max-height:500px) and (pointer:coarse){
+  body[data-study-view="quiz"] .local-banner,
+  body[data-study-view="quiz"] .preview-appearance,
+  body[data-study-view="exam"] .local-banner,
+  body[data-study-view="exam"] .preview-appearance{display:none}
+  body[data-study-view="quiz"] .wrap,
+  body[data-study-view="exam"] .wrap{padding-top:8px}
+  .cloud-panel-quiz{padding:8px 12px;margin-bottom:8px;border-top-width:1px;border-radius:12px}
+  .cloud-panel-quiz>div.mobile-profile-summary{display:flex;align-items:center;gap:10px;flex-wrap:nowrap;min-height:30px}
+  .mobile-profile-summary strong{font-size:13px;white-space:nowrap}
+  .mobile-profile-summary>span{flex:1;min-width:0;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mobile-profile-summary .btn{padding:5px 10px;font-size:12px;min-height:32px}
+  .cloud-panel-quiz:not(.is-expanded) .cloud-settings{display:none}
+  .cloud-panel-quiz.is-expanded .cloud-settings{padding-top:12px;margin-top:10px;border-top:1px solid #e5eaf1}
+  .cloud-panel-quiz .cloud-settings select{padding:7px 10px}
+  .cloud-panel-quiz .cloud-settings .actions{gap:8px}
+  .cloud-panel-quiz .cloud-settings .small{font-size:12px}
+  body[data-study-view="quiz"] .quiz-head,
+  body[data-study-view="exam"] .quiz-head{gap:8px;padding:6px 0 12px}
+  body[data-study-view="quiz"] .quiz-head .row{gap:9px}
+  body[data-study-view="quiz"] .quiz-head .label{font-size:11px;margin:0}
+  body[data-study-view="quiz"] .quiz-head h2{font-size:17px;margin:0}
+  body[data-study-view="quiz"] .quiz-head>.badge{font-size:11px;white-space:nowrap}
+  body[data-study-view="exam"] .quiz-head{display:grid;grid-template-columns:1fr auto}
+  body[data-study-view="exam"] .quiz-head>h2{grid-column:1 / -1;grid-row:2;font-size:16px;margin:0;line-height:1.4}
+  body[data-study-view="exam"] .quiz-head>.exam-clock{grid-column:2;grid-row:1;font-size:20px}
+  body[data-study-view="exam"] .quiz-head>.btn{justify-self:start;padding:7px 10px;font-size:12px}
+  body[data-study-view="quiz"] .question-panel,
+  body[data-study-view="exam"] .question-panel{padding:18px 16px;border-radius:14px}
+  body[data-study-view="quiz"] .question-top{margin-bottom:10px;gap:8px}
+  body[data-study-view="quiz"] .question-count{font-size:12px;text-align:right}
+  body[data-study-view="quiz"] .question-title,
+  body[data-study-view="exam"] .question-title{margin-top:8px;margin-bottom:18px;line-height:1.75}
+}

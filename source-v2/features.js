@@ -114,11 +114,13 @@ const V2 = (() => {
     const el=document.querySelector('#cloud-status');if(!el)return;
     el.textContent=Cloud.problem||Cloud.message;
     el.dataset.state=Cloud.problem?'error':Cloud.pack?.pending.length?'pending':Cloud.lastSync?'saved':'local';
+    const compact=document.querySelector('#cloud-status-compact');if(compact){compact.textContent=Cloud.problem?'保存异常':!Cloud.profile?'本机保存':Cloud.busy?'同步中…':Cloud.pack?.pending.length?'待传'+Cloud.pack.pending.length+'项':Cloud.lastSync?'已同步':'等待同步';compact.title=Cloud.problem||Cloud.message;compact.dataset.state=el.dataset.state;}
   }
   function panel(){
     const name=profiles.find(p=>p[0]===Cloud.profile)?.[1]||'本机访客';
     let legacy=0;try{legacy=Object.keys(JSON.parse(localStorage.getItem(E.key)||'{}').records||{}).length;}catch{}
-    return `<section class="cloud-panel"><div><label for="study-profile"><strong>当前用户</strong></label><select id="study-profile"><option value="">本机访客</option>${profiles.map(([id,name])=>`<option value="${id}" ${Cloud.profile===id?'selected':''}>${name}</option>`).join('')}</select><span id="cloud-status" role="status"></span></div><div class="actions"><button class="btn small outline" data-text-backup="copy">复制进度备份</button><button class="btn small outline" data-text-backup="restore">粘贴恢复</button>${Cloud.profile?'<button class="btn small outline" data-v2="sync">立即同步</button>':''}${Cloud.profile&&legacy?`<button class="btn small outline" data-v2="migrate">导入本机旧进度（${legacy}题）</button>`:''}</div><p class="small muted">${Cloud.profile?escape(name)+'的记录在手机、平板和电脑间同步。':'不选姓名时只保存本机。'} 三位用户互相独立；按约定只选姓名，无密码保护。</p></section>`;
+    const compact=view==='quiz'||view==='exam';
+    return `<section class="cloud-panel ${compact?'cloud-panel-quiz':''}">${compact?`<div class="mobile-profile-summary"><strong>${escape(name)}</strong><span id="cloud-status-compact" role="status"></span><button class="btn small outline" data-v2="profile-manage" aria-expanded="false">管理</button></div>`:''}<div class="cloud-settings"><div><label for="study-profile"><strong>当前用户</strong></label><select id="study-profile"><option value="">本机访客</option>${profiles.map(([id,name])=>`<option value="${id}" ${Cloud.profile===id?'selected':''}>${name}</option>`).join('')}</select><span id="cloud-status" role="status"></span></div><div class="actions"><button class="btn small outline" data-text-backup="copy">复制进度备份</button><button class="btn small outline" data-text-backup="restore">粘贴恢复</button>${Cloud.profile?'<button class="btn small outline" data-v2="sync">立即同步</button>':''}${Cloud.profile&&legacy?`<button class="btn small outline" data-v2="migrate">导入本机旧进度（${legacy}题）</button>`:''}</div><p class="small muted">${Cloud.profile?escape(name)+'的记录在手机、平板和电脑间同步。':'不选姓名时只保存本机。'} 三位用户互相独立；按约定只选姓名，无密码保护。</p></div></section>`;
   }
   save=capture;
   E.register=(target,id,answer,options={})=>{
@@ -208,6 +210,7 @@ const V2 = (() => {
     const fn={next,finish,returnHome}[name];const wrapped=function(...args){clock.settle();const result=fn(...args);clock.arm();return result;};if(name==='next')next=wrapped;else if(name==='finish')finish=wrapped;else returnHome=wrapped;
   }
   render=function(){
+    document.body.dataset.studyView=view;
     ensureSession();
     if(view==='exam')$('#app').innerHTML=examMarkup();else if(view==='exam-result')$('#app').innerHTML=examResultMarkup();else if(view==='timing')$('#app').innerHTML=timingList();else oldRender();
     $('#app').insertAdjacentHTML('afterbegin',panel());status();
@@ -218,7 +221,8 @@ const V2 = (() => {
   document.addEventListener('click',event=>{
     const v=event.target.closest('[data-v2]');if(!v||v.disabled)return;
     const action=v.dataset.v2;
-    if(action==='sync')sync();else if(action==='migrate')migrate();
+    if(action==='profile-manage'){const panel=v.closest('.cloud-panel');const expanded=panel.classList.toggle('is-expanded');v.setAttribute('aria-expanded',String(expanded));v.textContent=expanded?'收起':'管理';}
+    else if(action==='sync')sync();else if(action==='migrate')migrate();
     else if(action==='timing')start(timingIds(v.dataset.level),tierNames[v.dataset.level]+' · 用时专项','smart');
     else if(action==='timing-list'){clock.settle();timingLevel=v.dataset.level;view='timing';render();}
     else if(action==='exam-start')startExam();
