@@ -8,8 +8,12 @@ const V2 = (() => {
   const register=E.register, oldSave=save, oldRender=render;
   const Cloud={profile:null,pack:null,busy:false,inFlight:new Set(),message:'未选择用户 · 本机进度',lastSync:0,timer:null,uiSnapshot:'',recordsSnapshot:'',problem:'',diagnostics:[],ready:Promise.resolve()};
   const cacheKey=p=>'caac-profile-events-v2:'+bank.id+':'+p;
+  const cloudPageSize=100;
+  const catalogRevision=typeof bank.catalogRevision==='string'&&bank.catalogRevision?bank.catalogRevision:'legacy-1173';
+  const packRevision=pack=>typeof pack.catalogRevision==='string'&&pack.catalogRevision?pack.catalogRevision:'legacy-1173';
+  const needsCatalogReplay=pack=>packRevision(pack)!==catalogRevision;
   const uiOf=s=>({session:s.session,prefs:s.prefs,picked:s.picked,activeExam:s.exams?.active||null});
-  const freshPack=()=>({cursor:0,base:E.fresh(),pending:[],seen:{}});
+  const freshPack=()=>({cursor:0,base:E.fresh(),pending:[],seen:{},catalogRevision});
   function persist(){
     if(!Cloud.profile)return;
     try{localStorage.setItem(cacheKey(Cloud.profile),JSON.stringify(Cloud.pack));}
@@ -43,10 +47,10 @@ const V2 = (() => {
       if(target.exams.active?.id===p.result.id)target.exams.active=null;
     }
   }
-  function projected(){
-    const s=clone(Cloud.pack.base);
-    for(const event of Cloud.pack.pending)if(!Cloud.pack.seen[event.id])apply(s,event);
-    const checkpoint=Cloud.pack.localTiming;
+  function projected(pack=Cloud.pack){
+    const s=clone(pack.base);
+    for(const event of pack.pending)if(!pack.seen[event.id])apply(s,event);
+    const checkpoint=pack.localTiming;
     if(checkpoint&&questions.has(checkpoint.question)&&Number.isFinite(checkpoint.ms)&&checkpoint.ms>=0){const active=checkpoint.kind==='exam'?s.exams?.active:s.session;if(active&&(active.uid||active.id)===checkpoint.id){active.timeSpent||={};active.timeSpent[checkpoint.question]=Math.max(active.timeSpent[checkpoint.question]||0,checkpoint.ms);}}
     return s;
   }
@@ -70,33 +74,65 @@ const V2 = (() => {
     if(!response.ok)throw Error('云端请求失败（'+response.status+'）');
     return response.status===204?null:response.json();
   }
+  function checkEventCatalog(event){
+    const p=event.payload||{},ids=[];
+    const session=s=>{if(Array.isArray(s?.ids))ids.push(...s.ids);};
+    const exams=x=>{session(x?.active);if(Array.isArray(x?.history))for(const r of x.history)session(r);};
+    if(event.kind==='answer'&&typeof p.id==='string')ids.push(p.id);
+    if(event.kind==='ui'){session(p.session);session(p.activeExam);}
+    if(event.kind==='exam')session(p.result);
+    if(event.kind==='seed'&&p.state){ids.push(...Object.keys(p.state.records||{}));session(p.state.session);exams(p.state.exams);}
+    if(ids.some(id=>!questions.has(id))){const error=Error('云端记录包含当前题库尚未收录的题目，请更新页面后重试。');error.code='CATALOG_UPDATE_REQUIRED';throw error;}
+  }
+  function commitCatalogReplay(profile,source,rebuilt){
+    // Keep cached-only records and old exam snapshots without adding their counts twice.
+    apply(rebuilt.base,{kind:'seed',payload:{state:source.base}});
+    rebuilt.base=E.validate(rebuilt.base,{allowSession:true});
+    rebuilt.pending=source.pending.filter(event=>!rebuilt.seen[event.id]);
+    if(source.localTiming)rebuilt.localTiming=clone(source.localTiming);
+    E.validate(projected(rebuilt),{allowSession:true});
+    const key=cacheKey(profile),raw=localStorage.getItem(key)||JSON.stringify(source);
+    // One snapshot per profile bounds backup growth; neither write changes the displayed pack.
+    localStorage.setItem(key+':catalog-backup-v1',JSON.stringify({version:1,fromRevision:packRevision(source),toRevision:catalogRevision,savedAt:new Date().toISOString(),raw}));
+    localStorage.setItem(key,JSON.stringify(rebuilt));
+    Cloud.pack=rebuilt;
+  }
   async function sync(){
     if(!Cloud.profile||Cloud.busy)return;
-    const profile=Cloud.profile,pack=Cloud.pack;Cloud.busy=true;Cloud.message='正在同步…';status();
+    const profile=Cloud.profile,pack=Cloud.pack,replaying=needsCatalogReplay(pack),received=replaying?freshPack():pack;
+    Cloud.busy=true;Cloud.message=replaying?'题库更新核对中 · 原进度已保留…':'正在同步…';status();
     try{
       const pending=pack.pending.slice(0,100);
       Cloud.inFlight=new Set(pending.map(e=>e.id));
       if(pending.length)await request('rpc/caac_append_events',{method:'POST',body:JSON.stringify({p_profile:profile,p_events:pending})});
       let count;
       do{
-        const events=await request('caac_events?profile_id=eq.'+encodeURIComponent(profile)+'&seq=gt.'+pack.cursor+'&order=seq.asc&limit=1000');
+        const events=await request('caac_events?profile_id=eq.'+encodeURIComponent(profile)+'&seq=gt.'+received.cursor+'&order=seq.asc&limit='+cloudPageSize);
         if(Cloud.profile!==profile||Cloud.pack!==pack)return;
         count=events.length;
         for(const event of events){
-          if(!pack.seen[event.id]){try{apply(pack.base,event);}catch(error){Cloud.diagnostics.push({seq:event.seq,kind:event.kind,error:String(error)});Cloud.problem='有一条云端资料格式无效，已跳过；现有答题记录保留。';}pack.seen[event.id]=event.seq;}
-          pack.cursor=Math.max(pack.cursor,Number(event.seq));
+          // Do not consume a future catalog's event and permanently move past it.
+          checkEventCatalog(event);
+          if(!received.seen[event.id]){
+            if(replaying)apply(received.base,event);
+            else try{apply(received.base,event);}catch(error){Cloud.diagnostics.push({seq:event.seq,kind:event.kind,error:String(error)});Cloud.problem='有一条云端资料格式无效，已跳过；现有答题记录保留。';}
+            received.seen[event.id]=event.seq;
+          }
+          received.cursor=Math.max(received.cursor,Number(event.seq));
         }
-      }while(count===1000);
-      pack.pending=pack.pending.filter(e=>!pack.seen[e.id]);
+        if(replaying){Cloud.message='题库更新核对中 · 已读取 '+Object.keys(received.seen).length+' 项旧记录';status();}
+      }while(count===cloudPageSize);
+      if(replaying)commitCatalogReplay(profile,pack,received);
+      else pack.pending=pack.pending.filter(e=>!pack.seen[e.id]);
       const active=view==='quiz'?state.session:null,activeExam=view==='exam'?state.exams?.active:null;
       const before=JSON.stringify({records:state.records,prefs:state.prefs,picked:state.picked,exams:state.exams,session:state.session});
       state=projected();
       // An active device keeps its current question while all devices merge their answer records.
       if(active){if(state.session?.uid===active.uid)active.results={...state.session.results,...active.results};state.session=active;}
       if(activeExam){state.exams||={history:[]};const submitted=state.exams.history?.some(x=>x.id===activeExam.id);if(!submitted)state.exams.active=activeExam;else if(view==='exam')view='exam-result';}
-      remember();persist();Cloud.lastSync=Date.now();Cloud.message=pack.pending.length?'仍有 '+pack.pending.length+' 项等待同步':'已保存到云端';
+      remember();persist();Cloud.lastSync=Date.now();Cloud.message=Cloud.pack.pending.length?'仍有 '+Cloud.pack.pending.length+' 项等待同步':'已保存到云端';
       if(before!==JSON.stringify({records:state.records,prefs:state.prefs,picked:state.picked,exams:state.exams,session:state.session}))render();
-    }catch(error){if(Cloud.profile===profile){Cloud.diagnostics.push({syncError:String(error)});Cloud.message='暂未连上云端 · 本机待传 '+pack.pending.length+' 项';}}
+    }catch(error){if(Cloud.profile===profile){Cloud.diagnostics.push({syncError:String(error),catalogReplay:replaying});if(error.code==='CATALOG_UPDATE_REQUIRED')Cloud.problem=error.message;Cloud.message=error.code==='CATALOG_UPDATE_REQUIRED'?error.message:replaying?'题库更新同步未完成 · 原进度已保留 · 本机待传 '+pack.pending.length+' 项':'暂未连上云端 · 本机待传 '+pack.pending.length+' 项';}}
     finally{Cloud.inFlight.clear();Cloud.busy=false;status();if(Cloud.profile!==profile)Cloud.ready=sync();else if(Cloud.pack?.pending.length&&navigator.onLine&&Cloud.message.startsWith('仍有 '))Cloud.timer=setTimeout(sync,250);}
   }
   async function selectProfile(id){
@@ -108,13 +144,14 @@ const V2 = (() => {
     Cloud.profile=id||null;Cloud.pack=pack||null;Cloud.problem='';
     try{localStorage.setItem(chosenKey,id);}catch{}
     if(id)state=projected();else{try{state=E.validate(JSON.parse(localStorage.getItem(E.key)||JSON.stringify(E.fresh())),{allowSession:true});}catch{state=E.fresh();}}
-    view='home';tab='chapters';selected=null;writeBlocked=false;storageError='';remember();Cloud.message=id?'正在读取该用户云端记录…':'未选择用户 · 本机进度';render();Cloud.ready=sync();await Cloud.ready;
+    view='home';tab='chapters';selected=null;writeBlocked=false;storageError='';remember();Cloud.message=id?(needsCatalogReplay(pack)?'题库有更新 · 保留原进度并核对云端记录…':'正在读取该用户云端记录…'):'未选择用户 · 本机进度';render();Cloud.ready=sync();await Cloud.ready;
   }
   function status(){
     const el=document.querySelector('#cloud-status');if(!el)return;
     el.textContent=Cloud.problem||Cloud.message;
-    el.dataset.state=Cloud.problem?'error':Cloud.pack?.pending.length?'pending':Cloud.lastSync?'saved':'local';
-    const compact=document.querySelector('#cloud-status-compact');if(compact){compact.textContent=Cloud.problem?'保存异常':!Cloud.profile?'本机保存':Cloud.busy?'同步中…':Cloud.pack?.pending.length?'待传'+Cloud.pack.pending.length+'项':Cloud.lastSync?'已同步':'等待同步';compact.title=Cloud.problem||Cloud.message;compact.dataset.state=el.dataset.state;}
+    const replaying=Cloud.pack&&needsCatalogReplay(Cloud.pack);
+    el.dataset.state=Cloud.problem?'error':replaying||Cloud.pack?.pending.length?'pending':Cloud.lastSync?'saved':'local';
+    const compact=document.querySelector('#cloud-status-compact');if(compact){compact.textContent=Cloud.problem?'保存异常':!Cloud.profile?'本机保存':Cloud.busy?'同步中…':replaying?'更新待同步':Cloud.pack?.pending.length?'待传'+Cloud.pack.pending.length+'项':Cloud.lastSync?'已同步':'等待同步';compact.title=Cloud.problem||Cloud.message;compact.dataset.state=el.dataset.state;}
   }
   function panel(){
     const name=profiles.find(p=>p[0]===Cloud.profile)?.[1]||'本机访客';
@@ -170,20 +207,21 @@ const V2 = (() => {
   }
   function examHub(){
     const history=state.exams?.history||[],active=validateExam(state.exams?.active);
-    return `<section class="feature-section exam-hub"><h2>模拟考试</h2><p>120分钟 · 随机100道单选题 · 每题1分 · 80分合格</p><p class="small muted">每次抽题与选项顺序随机；交卷前不显示正误、技巧和视频。练习规则，不代表考场当前官方配置。截止时间按自然时间计算，切后台仍继续倒计时。</p><div class="actions"><button class="btn primary" data-v2="exam-start">开始模拟考试</button>${active?'<button class="btn outline" data-v2="exam-resume">继续未交卷考试</button>':''}</div>${history.length?`<h3>最近考试</h3>${[...history].sort((a,b)=>b.finishedAt-a.finishedAt).slice(0,5).map(r=>`<button class="exam-history" data-v2="exam-result" data-id="${escape(r.id)}"><span>${escape(new Date(r.finishedAt).toLocaleString('zh-CN'))}</span><strong>${r.correct}分 · ${r.correct>=80?'合格':'待提升'}</strong></button>`).join('')}`:''}</section>`;
+    const plan=E.examPlan(),minimumUpdated=Math.min(3,updateQuestionIds.length);
+    return `<section class="feature-section exam-hub"><h2>模拟考试</h2><p>120分钟 · 按章节配比抽100道单选题 · 每题1分 · 80分合格</p><p class="small muted">新开考试按本题库各章题量比例分配，再随机抽题并打乱题序和选项。这是练习配比，不是官方考试章节配比。${minimumUpdated?`每卷至少包含${minimumUpdated}道本批更新题，已计入所属章节和100题总量。`:''}交卷前不显示正误、技巧和视频；切后台仍继续倒计时。</p><details class="exam-blueprint"><summary>查看100题章节分配</summary><div class="exam-blueprint-grid">${plan.map(ch=>`<div><span>${escape(chapterName(ch.chapterId))}</span><strong>${ch.questionCount}题</strong></div>`).join('')}</div><p class="small muted">按当前${allIds.length}题的真实章节分布计算，整卷共100题；已开考的试卷沿用开考时的题目。</p></details><div class="actions"><button class="btn primary" data-v2="exam-start">开始模拟考试</button>${active?'<button class="btn outline" data-v2="exam-resume">继续未交卷考试</button>':''}</div>${history.length?`<h3>最近考试</h3>${[...history].sort((a,b)=>b.finishedAt-a.finishedAt).slice(0,5).map(r=>`<button class="exam-history" data-v2="exam-result" data-id="${escape(r.id)}"><span>${escape(new Date(r.finishedAt).toLocaleString('zh-CN'))}</span><strong>${r.correct}分 · ${r.correct>=80?'合格':'待提升'}</strong></button>`).join('')}`:''}</section>`;
   }
   let resultId=null,submittingExam=false;
   function startExam(){
     if(state.exams?.active&&!confirm('已有未交卷考试。是否新开一场？原未交卷试卷将被替换，不计入成绩。'))return;
-    clock.settle();stopMedia();const ids=shuffled(allIds).slice(0,100),optionOrder={};for(const id of ids)optionOrder[id]=examOptionOrder(questions.get(id));
-    state.exams||={active:null,history:[]};state.exams.active={id:uuid(),ids,index:0,answers:{},optionOrder,timeSpent:{},startedAt:Date.now(),deadline:Date.now()+120*60000};save();view='exam';render();window.scrollTo(0,0);
+    clock.settle();stopMedia();const {ids,sampling}=E.sampleExam(),optionOrder={};for(const id of ids)optionOrder[id]=examOptionOrder(questions.get(id));
+    state.exams||={active:null,history:[]};state.exams.active={id:uuid(),ids,sampling,index:0,answers:{},optionOrder,timeSpent:{},startedAt:Date.now(),deadline:Date.now()+120*60000};save();view='exam';render();window.scrollTo(0,0);
   }
   const remaining=exam=>Math.max(0,Math.ceil((exam.deadline-Date.now())/1000));
   const timeText=n=>Math.floor(n/60).toString().padStart(2,'0')+':'+(n%60).toString().padStart(2,'0');
   function examMarkup(){
     const exam=validateExam(state.exams?.active);if(!exam){view='home';return homeMarkup();}
     const id=exam.ids[exam.index],q=questions.get(id),answers=exam.answers||{},order=exam.optionOrder[id];
-    return `<header class="quiz-head"><button class="btn small outline" data-v2="exam-home">暂存并返回首页</button><h2>模拟考试 · 第 ${exam.index+1} / 100 题</h2><span class="exam-clock" id="exam-countdown">${timeText(remaining(exam))}</span></header><div class="quiz-layout"><main class="question-panel"><span class="badge">单选题 · ${escape(chapterName(q.chapterId))}</span><h1 class="question-title">${questionCue(q.question)}</h1>${safeUrl(q.questionImg)?`<img class="question-image" src="${escape(q.questionImg)}" alt="题目配图">`:''}<div class="options">${order.map((code,i)=>{const a=q.answers.find(a=>a.answerCode===code);return `<button class="option ${answers[id]===code?'selected':''}" data-v2="exam-answer" data-code="${escape(code)}" aria-pressed="${answers[id]===code}"><span class="letter">${String.fromCharCode(65+i)}</span><span>${escape(examOptionText(a))}${safeUrl(a.answerImg)?`<img src="${escape(a.answerImg)}" alt="选项配图">`:''}</span></button>`;}).join('')}</div><p class="small muted">选择即保存并自动进入下一题；可通过答题卡返回修改，交卷后统一判分。</p><div class="quiz-controls"><button class="btn outline" data-v2="exam-prev" ${exam.index===0?'disabled':''}>上一题</button><button class="btn primary" data-v2="exam-next" ${exam.index===99?'disabled':''}>下一题</button></div></main><aside class="quiz-aside"><h3>已选 ${Object.keys(answers).length} / 100 题</h3><div class="palette">${exam.ids.map((id,i)=>`<button class="${i===exam.index?'current ':''}${answers[id]?'chosen-exam':''}" data-v2="exam-jump" data-index="${i}">${i+1}</button>`).join('')}</div><p class="small muted">蓝色表示已选择，不代表正确。到时自动交卷；刷新页面不会重置倒计时。</p><button class="btn primary" data-v2="exam-submit">交卷并查看分析</button></aside></div>`;
+    return `<header class="quiz-head"><button class="btn small outline" data-v2="exam-home">暂存并返回首页</button><h2>模拟考试 · 第 ${exam.index+1} / 100 题</h2><span class="exam-clock" id="exam-countdown">${timeText(remaining(exam))}</span></header><div class="quiz-layout"><main class="question-panel"><span class="badge">单选题 · ${escape(chapterName(q.chapterId))}</span><h1 class="question-title">${questionCue(q.question)}</h1>${questionSourceMarkup(q)}${safeUrl(q.questionImg)?`<img class="question-image" src="${escape(q.questionImg)}" alt="题目配图">`:''}<div class="options">${order.map((code,i)=>{const a=q.answers.find(a=>a.answerCode===code);return `<button class="option ${answers[id]===code?'selected':''}" data-v2="exam-answer" data-code="${escape(code)}" aria-pressed="${answers[id]===code}"><span class="letter">${String.fromCharCode(65+i)}</span><span>${escape(examOptionText(a))}${safeUrl(a.answerImg)?`<img src="${escape(a.answerImg)}" alt="选项配图">`:''}</span></button>`;}).join('')}</div><p class="small muted">选择即保存并自动进入下一题；可通过答题卡返回修改，交卷后统一判分。</p><div class="quiz-controls"><button class="btn outline" data-v2="exam-prev" ${exam.index===0?'disabled':''}>上一题</button><button class="btn primary" data-v2="exam-next" ${exam.index===99?'disabled':''}>下一题</button></div></main><aside class="quiz-aside"><h3>已选 ${Object.keys(answers).length} / 100 题</h3><div class="palette">${exam.ids.map((id,i)=>`<button class="${i===exam.index?'current ':''}${answers[id]?'chosen-exam':''}" data-v2="exam-jump" data-index="${i}">${i+1}</button>`).join('')}</div><p class="small muted">蓝色表示已选择，不代表正确。到时自动交卷；刷新页面不会重置倒计时。</p><button class="btn primary" data-v2="exam-submit">交卷并查看分析</button></aside></div>`;
   }
   function deterministicId(text){let a=2166136261,b=2246822519,c=3266489917,d=668265263;for(const ch of text){const n=ch.charCodeAt(0);a=Math.imul(a^n,16777619);b=Math.imul(b^n,3266489917);c=Math.imul(c^n,668265263);d=Math.imul(d^n,374761393);}const h=[a,b,c,d].map(x=>(x>>>0).toString(16).padStart(8,'0')).join('');return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);}
   function finishExam(automatic=false){
@@ -208,7 +246,7 @@ const V2 = (() => {
     const rows=bank.chapters.map(ch=>{const ids=r.ids.filter(id=>questions.get(id).chapterId===ch.id);const right=ids.filter(id=>questions.get(id).answers.some(a=>a.answerCode===r.answers[id]&&a.isRight)).length;return {...ch,ids,right,wrong:ids.length-right,accuracy:ids.length?right/ids.length*100:null};}).filter(x=>x.ids.length);
     const weak=rows.filter(x=>x.wrong).sort((a,b)=>b.wrong-a.wrong||(a.accuracy-b.accuracy));
     const wrong=r.ids.filter(id=>!questions.get(id).answers.some(a=>a.answerCode===r.answers[id]&&a.isRight));
-    return `<section class="feature-section"><button class="btn outline small" data-action="home">返回首页</button><p class="eyebrow">模拟考试结果 · 已保存</p><h1>${r.correct} / 100 分 · ${r.correct>=80?'合格':'需要继续巩固'}</h1><p>未答 ${r.missing} 题 · ${r.automatic?'到时自动交卷':'主动交卷'} · 合格线80分</p><h2>建议补足的板块</h2>${weak.length?weak.map((ch,i)=>`<article class="timing-row"><div><strong>${i+1}. ${escape(ch.name)}</strong><p>本次 ${ch.ids.length} 题，答对 ${ch.right}，错题或未答 ${ch.wrong}；正确率 ${percent(ch.accuracy)}。${ch.ids.length<5?'样本较少，仅供复习参考。':''}</p></div><button class="btn small" data-v2="exam-weak" data-result="${escape(r.id)}" data-chapter="${ch.id}">补足本板块</button></article>`).join(''):'<p>本次全部答对，可复习高用时题和历史错题。</p>'}<div class="table-scroll"><table><thead><tr><th>章节</th><th>抽到题数</th><th>正确</th><th>错／未答</th><th>正确率</th></tr></thead><tbody>${rows.map(ch=>`<tr><td>${escape(ch.name)}</td><td>${ch.ids.length}</td><td>${ch.right}</td><td>${ch.wrong}</td><td>${percent(ch.accuracy)}</td></tr>`).join('')}</tbody></table></div><h2>本次错题与未答题</h2><p class="small muted">未答题纳入本次考试分析，不伪造一次日常作答；已答错题会进入错题本。</p>${wrong.map(id=>{const q=questions.get(id),order=r.optionOrder[id];const code=r.answers[id],position=order.indexOf(code);return `<details class="exam-review"><summary>${escape(plain(q.question))}</summary><p>你的选择：${code?String.fromCharCode(65+position)+'. '+escape(examOptionText(q.answers.find(a=>a.answerCode===code)))+'（原题选项 '+escape(code)+'）':'未答'}</p><p>本场正确答案：${q.answers.filter(a=>a.isRight).map(a=>String.fromCharCode(65+order.indexOf(a.answerCode))+'. '+escape(examOptionText(a))+'（原题选项 '+escape(a.answerCode)+'）').join('；')}</p>${examSourceReference(q,order)}<h3>原题答题技巧与解析</h3>${formattedStudyText(q.analysis,'暂无答题技巧。')}${formattedStudyText(q.txtExplain,'暂无文字解析。')}${courseQuestionMarkup(id)}<button class="btn small" data-action="single" data-id="${id}">重新练习这题</button></details>`;}).join('')||'<p>没有错题。</p>'}</section>`;
+    return `<section class="feature-section"><button class="btn outline small" data-action="home">返回首页</button><p class="eyebrow">模拟考试结果 · 已保存</p><h1>${r.correct} / 100 分 · ${r.correct>=80?'合格':'需要继续巩固'}</h1><p>未答 ${r.missing} 题 · ${r.automatic?'到时自动交卷':'主动交卷'} · 合格线80分</p><h2>建议补足的板块</h2>${weak.length?weak.map((ch,i)=>`<article class="timing-row"><div><strong>${i+1}. ${escape(ch.name)}</strong><p>本次 ${ch.ids.length} 题，答对 ${ch.right}，错题或未答 ${ch.wrong}；正确率 ${percent(ch.accuracy)}。${ch.ids.length<5?'样本较少，仅供复习参考。':''}</p></div><button class="btn small" data-v2="exam-weak" data-result="${escape(r.id)}" data-chapter="${ch.id}">补足本板块</button></article>`).join(''):'<p>本次全部答对，可复习高用时题和历史错题。</p>'}<div class="table-scroll"><table><thead><tr><th>章节</th><th>抽到题数</th><th>正确</th><th>错／未答</th><th>正确率</th></tr></thead><tbody>${rows.map(ch=>`<tr><td>${escape(ch.name)}</td><td>${ch.ids.length}</td><td>${ch.right}</td><td>${ch.wrong}</td><td>${percent(ch.accuracy)}</td></tr>`).join('')}</tbody></table></div><h2>本次错题与未答题</h2><p class="small muted">未答题纳入本次考试分析，不伪造一次日常作答；已答错题会进入错题本。</p>${wrong.map(id=>{const q=questions.get(id),order=r.optionOrder[id];const code=r.answers[id],position=order.indexOf(code);return `<details class="exam-review"><summary>${escape(plain(q.question))}</summary><p>你的选择：${code?String.fromCharCode(65+position)+'. '+escape(examOptionText(q.answers.find(a=>a.answerCode===code)))+'（原题选项 '+escape(code)+'）':'未答'}</p><p>本场正确答案：${q.answers.filter(a=>a.isRight).map(a=>String.fromCharCode(65+order.indexOf(a.answerCode))+'. '+escape(examOptionText(a))+'（原题选项 '+escape(a.answerCode)+'）').join('；')}</p>${examSourceReference(q,order)}<h3>原题答题技巧与解析</h3>${formattedStudyText(q.analysis,'暂无答题技巧。')}${formattedStudyText(q.txtExplain,'暂无文字解析。')}${questionSourceMarkup(q)}${questionReviewMarkup(q)}${courseQuestionMarkup(id)}<button class="btn small" data-action="single" data-id="${id}">重新练习这题</button></details>`;}).join('')||'<p>没有错题。</p>'}</section>`;
   }
   function ensureSession(){if(state.session&&!state.session.uid)state.session.uid=uuid();}
   // Extend the original practice flow; keep its question IDs, progress key and answer content unchanged.

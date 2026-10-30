@@ -1,7 +1,14 @@
 /* Local progress is intentionally independent from the source platform. */
 const StudyEngine = (() => {
   const bank = JSON.parse(document.getElementById('bank-data').textContent);
-  const questions = new Map(bank.questions.map((q, i) => [q.id, { ...q, order: i }]));
+  const activeIds = bank.questions.map(q => q.id), activeIdSet = new Set(activeIds);
+  const archivedQuestions = Array.isArray(bank.archivedQuestions) ? bank.archivedQuestions : [];
+  const originalOrder = new Map((bank.originalQuestionIds || []).map((id, i) => [id, i]));
+  let nextOrder = originalOrder.size;
+  const questions = new Map([...bank.questions, ...archivedQuestions].map((q, i) => [q.id, {
+    ...q, order: originalOrder.size ? originalOrder.get(q.id) ?? nextOrder++ : i,
+    archived: !activeIdSet.has(q.id)
+  }]));
   const key = 'caac-study-progress-v1:' + bank.id;
   const defaults = () => ({ chapters: bank.chapters.map(c => c.id), scope: 'all', order: 'smart', limit: 30, tips: true, explanation: true, video: true, autoNext: true });
   const fresh = () => ({ version: 1, bankId: bank.id, records: {}, session: null, prefs: defaults(), picked: [] });
@@ -61,6 +68,49 @@ const StudyEngine = (() => {
         questions.get(a).order - questions.get(b).order;
     });
   }
+  function examPlan() {
+    const plan = bank.chapters.map((chapter, index) => ({
+      chapterId: chapter.id, index,
+      bankCount: bank.questions.filter(q => q.chapterId === chapter.id).length
+    }));
+    const total = plan.reduce((n, chapter) => n + chapter.bankCount, 0);
+    if (total !== bank.questions.length || total < 100) throw new Error('题库章节归属或题量不满足100题组卷要求');
+    for (const chapter of plan) {
+      chapter.questionCount = Math.floor(chapter.bankCount * 100 / total);
+      chapter.remainder = chapter.bankCount * 100 % total;
+    }
+    const extra = 100 - plan.reduce((n, chapter) => n + chapter.questionCount, 0);
+    const ranked = [...plan].sort((a, b) => b.remainder - a.remainder || a.index - b.index);
+    for (let i = 0; i < extra; i++) ranked[i].questionCount++;
+    return plan.map(({ chapterId, bankCount, questionCount }) => ({ chapterId, bankCount, questionCount }));
+  }
+  function sampleExam() {
+    const plan = examPlan();
+    const updated = new Set((bank.updateBatch?.questionIds || []).filter(id => activeIdSet.has(id)));
+    const minimumUpdated = Math.min(3, updated.size);
+    const reserved = new Map(plan.map(chapter => [chapter.chapterId, []]));
+    const quotas = new Map(plan.map(chapter => [chapter.chapterId, chapter.questionCount]));
+    let reservedCount = 0;
+    // Reserve new questions inside the real chapter quotas; the update collection is not an extra sampling chapter.
+    for (const id of order([...updated], 'random')) {
+      if (reservedCount >= minimumUpdated) break;
+      const chapterId = questions.get(id).chapterId, selected = reserved.get(chapterId);
+      if (selected && selected.length < quotas.get(chapterId)) { selected.push(id); reservedCount++; }
+    }
+    if (reservedCount < minimumUpdated) throw new Error('当前章节配额无法容纳更新题，请检查题库归属');
+    const selected = plan.flatMap(chapter => {
+      const first = reserved.get(chapter.chapterId);
+      const pool = bank.questions.filter(q => q.chapterId === chapter.chapterId && !first.includes(q.id)).map(q => q.id);
+      return [...first, ...order(pool, 'random').slice(0, chapter.questionCount - first.length)];
+    });
+    const ids = order(selected, 'random');
+    if (ids.length !== 100 || new Set(ids).size !== 100) throw new Error('模拟试卷必须恰好包含100道不同题目');
+    return { ids, sampling: {
+      version: 'chapter-proportional-v1', reference: 'current-question-bank',
+      catalogRevision: bank.catalogRevision || 'legacy-1173', chapters: plan,
+      minimumUpdated, selectedUpdated: ids.filter(id => updated.has(id)).length
+    } };
+  }
   function validate(raw, { allowSession = false } = {}) {
     if (!raw || raw.version !== 1 || raw.bankId !== bank.id || !raw.records || typeof raw.records !== 'object' || Array.isArray(raw.records)) throw new Error('备份版本或题库不匹配');
     const state = fresh();
@@ -106,5 +156,5 @@ const StudyEngine = (() => {
     }
     return state;
   }
-  return { bank, questions, key, fresh, today, stats, register, order, validate };
+  return { bank, questions, activeIds, key, fresh, today, stats, register, order, examPlan, sampleExam, validate };
 })();
